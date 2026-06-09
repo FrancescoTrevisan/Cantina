@@ -266,10 +266,23 @@ async function sbLoad() {
     const r = await fetch(`${SB_URL}/rest/v1/wines?id=eq.${ROW_ID}&select=data`, { headers: SB_HEADERS });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const rows = await r.json();
-    if (rows.length > 0 && rows[0].data) {
-      wines = Array.isArray(rows[0].data) ? rows[0].data : [];
+    if (rows.length > 0 && rows[0].data && Array.isArray(rows[0].data) && rows[0].data.length > 0) {
+      // Supabase ha dati: usali solo se sono più "ricchi" (hanno ai) rispetto al locale
+      const remote = rows[0].data;
+      const local = localStorage.getItem('cantina_v1');
+      if (local) {
+        const localData = JSON.parse(local);
+        const remoteAiCount = remote.filter(w=>w.ai).length;
+        const localAiCount = localData.filter(w=>w.ai).length;
+        // Usa il dataset con più analisi AI
+        wines = localAiCount > remoteAiCount ? localData : remote;
+        // Se il locale era migliore, sincronizza su Supabase
+        if (localAiCount > remoteAiCount) { await sbSave(); }
+      } else {
+        wines = remote;
+      }
     } else {
-      // Prova migrazione da localStorage
+      // Supabase vuoto: prova localStorage
       const local = localStorage.getItem('cantina_v1') || localStorage.getItem('cantina_wines');
       if (local) { wines = JSON.parse(local); await sbSave(); }
     }
@@ -316,11 +329,30 @@ function importData(e) {
     try {
       const data = JSON.parse(ev.target.result);
       if (!Array.isArray(data)) throw new Error();
-      const ids = new Set(wines.map(w=>w.id));
-      const nuovi = data.filter(w=>!ids.has(w.id));
-      wines = [...wines, ...nuovi];
+      // Sostituisce completamente i dati esistenti con quelli importati
+      // I vini già presenti vengono aggiornati (mantiene il dato più ricco)
+      const importMap = new Map(data.map(w=>[w.id, w]));
+      const existingMap = new Map(wines.map(w=>[w.id, w]));
+      // Merge: per ogni vino importato, usa quello con più dati AI
+      const merged = [];
+      for (const [id, imported] of importMap) {
+        const existing = existingMap.get(id);
+        if (existing && existing.ai && !imported.ai) {
+          merged.push(existing); // mantieni AI esistente
+        } else {
+          merged.push(imported); // usa importato (ha AI o è nuovo)
+        }
+      }
+      // Aggiungi vini locali non presenti nell'import
+      for (const [id, w] of existingMap) {
+        if (!importMap.has(id)) merged.push(w);
+      }
+      wines = merged;
+      // Salva in locale prima, poi su Supabase
+      try { localStorage.setItem('cantina_v1', JSON.stringify(wines)); } catch(e){}
       await sbSave(); renderAll();
-      toast(`Importati ${nuovi.length} vini`, 'success');
+      const aiCount = wines.filter(w=>w.ai).length;
+      toast(`${wines.length} vini caricati, ${aiCount} con analisi AI`, 'success');
     } catch { toast('File non valido', 'error'); }
     e.target.value = '';
   };
